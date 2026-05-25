@@ -17,11 +17,19 @@ class MarketSnapshot:
     error: str | None = None
 
 
-def _normalize_ticker(ticker: str, market: str) -> str:
+def _candidate_tickers(ticker: str, market: str) -> list[str]:
+    """Build yfinance ticker candidates.
+
+    Korean common stocks need the `.KS` suffix and many KOSDAQ names need `.KQ`.
+    In AUTO mode, try those before the raw numeric code so `005930` works as
+    `005930.KS` instead of being queried as an invalid Yahoo ticker.
+    """
     t = ticker.strip().upper()
-    if market == "KRX" and t.isdigit() and len(t) == 6:
-        return f"{t}.KS"
-    return t
+    if t.endswith((".KS", ".KQ")):
+        return [t]
+    if t.isdigit() and len(t) == 6 and market in {"AUTO", "KRX"}:
+        return [f"{t}.KS", f"{t}.KQ"]
+    return [t]
 
 
 def _pct(a: float, b: float) -> float | None:
@@ -64,18 +72,17 @@ def fetch_market_snapshot(ticker: str, company_name: str = "", market: str = "AU
     except ImportError as exc:
         return MarketSnapshot(ticker, market, False, "", error="yfinance가 설치되어 있지 않습니다.")
 
-    yf_ticker = _normalize_ticker(ticker, "KRX" if market == "KRX" else market)
+    yf_ticker = ticker.strip().upper()
+    data = None
     try:
-        data = yf.download(yf_ticker, period="1y", interval="1d", auto_adjust=True, progress=False, threads=False)
-        if data is None or data.empty:
-            # 자동 감지: 한국 6자리라면 .KQ도 시도
-            if ticker.isdigit() and len(ticker) == 6:
-                for suffix in [".KS", ".KQ"]:
-                    yf_ticker_try = f"{ticker}{suffix}"
-                    data = yf.download(yf_ticker_try, period="1y", interval="1d", auto_adjust=True, progress=False, threads=False)
-                    if data is not None and not data.empty:
-                        yf_ticker = yf_ticker_try
-                        break
+        for yf_ticker_try in _candidate_tickers(ticker, market):
+            try:
+                data = yf.download(yf_ticker_try, period="1y", interval="1d", auto_adjust=True, progress=False, threads=False)
+            except Exception:
+                data = None
+            if data is not None and not data.empty:
+                yf_ticker = yf_ticker_try
+                break
         if data is None or data.empty:
             return MarketSnapshot(ticker, market, False, "", error=f"가격 데이터를 가져오지 못했습니다: {ticker}")
 

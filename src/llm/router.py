@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from src.config import LLMSettings, Provider
+from src.config import LLMSettings, Provider, setting
 
 
 class LLMClient(Protocol):
@@ -80,37 +80,49 @@ class OpenAICompatibleClient:
 class HuggingFaceClient:
     settings: LLMSettings
 
+    def _router_model_id(self) -> str:
+        """Return the model id to send to the Hugging Face Inference Router.
+
+        The current Hugging Face Inference Providers API is OpenAI-compatible and
+        uses https://router.huggingface.co/v1.  Some models require an explicit
+        provider suffix such as `:novita`, `:deepinfra`, `:together`, etc.
+        You can set HF_PROVIDER_SUFFIX in Streamlit Secrets or in the sidebar.
+        """
+        model = (self.settings.model or "").strip()
+        suffix = str(setting("HF_PROVIDER_SUFFIX", "")).strip().lstrip(":")
+        if suffix and ":" not in model.split("/")[-1]:
+            model = f"{model}:{suffix}"
+        return model
+
     def complete(self, *, system: str, user: str) -> str:
         try:
-            from huggingface_hub import InferenceClient
+            from openai import OpenAI
         except ImportError as exc:
-            raise RuntimeError("huggingface_hub 패키지가 설치되어 있지 않습니다. pip install huggingface-hub") from exc
+            raise RuntimeError("openai 패키지가 설치되어 있지 않습니다. pip install openai") from exc
 
         if not self.settings.api_key:
             raise ValueError("HF_TOKEN이 비어 있습니다.")
 
-        client = InferenceClient(token=self.settings.api_key)
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        base_url = str(setting("HF_BASE_URL", "https://router.huggingface.co/v1")).strip()
+        model = self._router_model_id()
+        client = OpenAI(api_key=self.settings.api_key, base_url=base_url)
 
-        # Hugging Face InferenceClient의 chat.completions 인터페이스를 우선 사용합니다.
-        # Gemma 계열 모델이 계정/Provider에서 활성화되어 있어야 합니다.
         try:
             response = client.chat.completions.create(
-                model=self.settings.model,
-                messages=messages,
+                model=model,
                 temperature=self.settings.temperature,
                 max_tokens=self.settings.max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as first_error:
-            # 일부 Provider는 text_generation만 열려 있을 수 있어, 명확한 안내가 가능한 오류로 변환합니다.
             raise RuntimeError(
-                "Hugging Face 호출에 실패했습니다. HF_TOKEN, 모델 라이선스 동의, "
-                "Inference Provider 활성화 여부, 모델 ID를 확인하세요. "
-                f"원본 오류: {first_error}"
+                "Hugging Face Router 호출에 실패했습니다. HF_TOKEN 권한, Gemma 라이선스 동의, "
+                "Inference Providers 활성화 여부, 모델 ID 및 provider suffix를 확인하세요. "
+                f"사용한 endpoint={base_url}, model={model}, 원본 오류: {first_error}"
             ) from first_error
 
 

@@ -23,6 +23,7 @@ from src.llm.router import build_llm_client
 from src.orchestrator import MultiAgentOrchestrator
 from src.data.market_data import fetch_market_snapshot
 from src.data.news import fetch_news_snapshot
+from src.data.ticker_resolver import resolve_stock_input
 from src.reports import write_markdown_report
 
 load_dotenv()
@@ -146,9 +147,28 @@ with st.sidebar:
     )
     api_key = api_key_input.strip() or secret_or_env_key
 
-    model = st.text_input("모델 ID", value=default_model_for(provider))
+    model = st.text_input(
+        "모델 ID",
+        value=default_model_for(provider),
+        help="HF Router에서는 모델 ID 뒤에 :novita, :deepinfra, :together 같은 provider suffix를 붙일 수 있습니다.",
+    )
 
     base_url = None
+    hf_base_url = None
+    hf_provider_suffix = None
+    if provider == Provider.HUGGINGFACE:
+        hf_base_url = st.text_input(
+            "HF Router Base URL",
+            value=str(setting("HF_BASE_URL", "https://router.huggingface.co/v1")),
+            help="기존 api-inference.huggingface.co가 아니라 현재 Inference Providers Router를 사용합니다.",
+        )
+        hf_provider_suffix = st.text_input(
+            "HF Provider suffix 선택 입력",
+            value=str(setting("HF_PROVIDER_SUFFIX", "")),
+            placeholder="예: novita / deepinfra / together / cerebras",
+            help="모델 호출이 unsupported로 실패하면 Hugging Face 모델 페이지 또는 Playground에서 지원 provider를 확인한 뒤 입력하세요.",
+        )
+
     if provider == Provider.OPENAI_COMPATIBLE:
         base_url = st.text_input("Base URL", value=default_base_url())
 
@@ -163,8 +183,8 @@ with st.sidebar:
     st.divider()
     st.markdown('<div class="term-header">ANALYSIS INPUT</div>', unsafe_allow_html=True)
 
-    ticker = st.text_input("종목 티커", placeholder="005930 / AAPL / NVDA")
-    company_name = st.text_input("회사명 힌트", placeholder="삼성전자 / Apple / NVIDIA")
+    target_input = st.text_input("종목명 또는 티커", placeholder="삼성전자 / 005930 / Apple / AAPL / NVDA")
+    company_name = st.text_input("회사명 힌트 선택 입력", placeholder="자동 인식 실패 시 입력: 삼성전자 / Apple / NVIDIA")
     market = st.selectbox("시장", ["AUTO", "KRX", "US"], index=0)
     collect_data = st.checkbox("앱에서 yfinance + Google News RSS 보조 데이터 수집", value=env_bool("APP_ENABLE_DATA_COLLECTOR", True))
     max_workers = st.slider("Phase 1 병렬 에이전트 수", min_value=1, max_value=3, value=3)
@@ -192,12 +212,18 @@ if "last_ticker" not in st.session_state:
     st.session_state.last_ticker = ""
 
 if run:
-    if not ticker.strip():
-        st.error("종목 티커를 입력하세요.")
+    if not target_input.strip():
+        st.error("종목명 또는 티커를 입력하세요. 예: 삼성전자, 005930, Apple, AAPL")
         st.stop()
     if not str(api_key).strip():
         st.error("선택한 LLM 엔진의 API Key / Token을 입력하거나 Streamlit Secrets에 설정하세요.")
         st.stop()
+
+    if provider == Provider.HUGGINGFACE:
+        if hf_base_url:
+            os.environ["HF_BASE_URL"] = hf_base_url.strip()
+        if hf_provider_suffix is not None:
+            os.environ["HF_PROVIDER_SUFFIX"] = hf_provider_suffix.strip()
 
     settings = LLMSettings(
         provider=provider,
@@ -209,12 +235,33 @@ if run:
         anthropic_web_search=anthropic_web_search,
     )
 
+    resolution = resolve_stock_input(target_input.strip(), company_name.strip(), market)
+    analysis_ticker = resolution.ticker
+    analysis_company_name = company_name.strip() or resolution.company_name
+    analysis_market = resolution.market if market == "AUTO" else market
+
+    st.markdown("### 종목 인식 결과")
+    st.markdown(resolution.to_markdown())
+    if not resolution.resolved:
+        st.warning("종목명을 티커로 확정하지 못했습니다. 한국 종목은 6자리 코드, 미국 종목은 영문 티커를 직접 입력하면 가격 데이터 정확도가 올라갑니다.")
+
     data_contexts: list[str] = []
     price_frame = None
+    resolver_context = f"""
+## 앱 종목 인식 컨텍스트
+- 사용자 입력: {resolution.original_input}
+- 분석 티커: {analysis_ticker}
+- 인식 회사명: {analysis_company_name or 'N/A'}
+- 인식 시장: {analysis_market}
+- 인식 방식: {resolution.method}
+- 인식 신뢰도: {resolution.confidence:.2f}
+- 메모: {resolution.note or 'N/A'}
+""".strip()
+    data_contexts.append(resolver_context)
 
     with st.status("앱 보조 데이터 수집 중...", expanded=True) as data_status:
         if collect_data:
-            snap = fetch_market_snapshot(ticker.strip(), company_name.strip(), market)
+            snap = fetch_market_snapshot(analysis_ticker, analysis_company_name, analysis_market)
             if snap.ok:
                 st.write("가격/기술적 지표 수집 완료")
                 data_contexts.append(snap.summary_markdown)
@@ -222,7 +269,7 @@ if run:
             else:
                 st.warning(f"가격 데이터 수집 실패: {snap.error}")
 
-            news = fetch_news_snapshot(ticker.strip(), company_name.strip())
+            news = fetch_news_snapshot(analysis_ticker, analysis_company_name)
             if news.ok:
                 st.write("뉴스 RSS 수집 완료")
                 data_contexts.append(news.summary_markdown)
@@ -290,22 +337,22 @@ if run:
     started = time.time()
     try:
         state = orchestrator.run(
-            ticker=ticker.strip().upper(),
-            company_name=company_name.strip(),
-            market=market,
+            ticker=analysis_ticker.strip().upper(),
+            company_name=analysis_company_name.strip(),
+            market=analysis_market,
             data_context="\n\n".join(data_contexts),
             on_status=on_status,
             on_result=on_result,
         )
         report = orchestrator.build_full_report(state)
         st.session_state.last_report = report
-        st.session_state.last_ticker = ticker.strip().upper()
+        st.session_state.last_ticker = analysis_ticker.strip().upper()
 
         st.success(f"분석 완료 · 소요 시간 {time.time() - started:.1f}초")
         deploy_mode = str(setting("STREAMLIT_DEPLOY_MODE", "local")).strip().lower()
         if deploy_mode != "cloud":
             try:
-                report_path = write_markdown_report(report, ticker.strip().upper())
+                report_path = write_markdown_report(report, analysis_ticker.strip().upper())
                 st.info(f"로컬 리포트 저장: {report_path}")
             except Exception as save_exc:
                 st.warning(f"리포트 파일 저장은 건너뜁니다: {save_exc}")
@@ -313,7 +360,7 @@ if run:
         st.download_button(
             "⬇ Markdown 리포트 다운로드",
             data=report.encode("utf-8"),
-            file_name=f"{ticker.strip().upper()}_stock_report.md",
+            file_name=f"{analysis_ticker.strip().upper()}_stock_report.md",
             mime="text/markdown",
         )
     except Exception as exc:
