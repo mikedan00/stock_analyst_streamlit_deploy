@@ -1,0 +1,13 @@
+# Streamlit Cloud deployment dependencies
+# 로컬 LLM/transformers/CUDA 패키지는 포함하지 않습니다.
+streamlit>=1.40.0
+python-dotenv>=1.0.1
+anthropic>=0.40.0
+openai>=1.55.0
+huggingface-hub>=0.26.0
+pandas>=2.2.0
+numpy>=1.26.0
+yfinance>=0.2.50
+feedparser>=6.0.11
+requests>=2.32.0
+plotly>=5.24.0
