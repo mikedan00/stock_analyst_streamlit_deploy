@@ -140,3 +140,21 @@ LLM 응답이 너무 길거나 동시 병렬 호출이 오래 걸리는 경우�
 
 `APP_PASSWORD`를 반드시 설정하세요.
 비워두면 앱이 공개됩니다.
+
+---
+
+## Blank Screen Hotfix
+
+If the build log says `Uvicorn server started` and `Updated app!` but the left app area is blank:
+
+1. Keep `runtime.txt` in the repository root with:
+   ```txt
+   python-3.11
+   ```
+2. Do not include `packages.txt` unless real Ubuntu apt package names are needed.
+3. Keep `.streamlit/config.toml` theme-only. Avoid overriding `[server]` settings on Streamlit Cloud.
+4. Set Main file path to:
+   ```txt
+   streamlit_app.py
+   ```
+5. Reboot the app from Streamlit Cloud after pushing these changes.
