@@ -1,0 +1,11 @@
+streamlit==1.40.2
+python-dotenv==1.0.1
+anthropic==0.40.0
+openai==1.55.3
+huggingface-hub==0.26.5
+pandas==2.2.3
+numpy==1.26.4
+yfinance==0.2.50
+feedparser==6.0.11
+requests==2.32.3
+plotly==5.24.1
